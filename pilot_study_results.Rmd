@@ -1,0 +1,182 @@
+---
+title: "Pilot_study_results"
+author: "Kara Andres"
+date: "2023-05-24"
+output: 
+  pdf_document:
+    toc: yes
+  html_document:
+    theme: cerulean
+    highlight: kate
+    toc: yes
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Overview
+
+This report is a summary of the data analysis results from the pilot study. The primary objective of the pilot study was to test whether freezing the fish prior to gut content removal would impact the resulting microbiome data. To test this, I collected 29 Rainbow darters (*Etheostoma caeruleum*; primarily insectivorous) and 16 Central stonerollers (*Campostoma anomalum*; primarily herbivorous). I immediately removed the gut contents of half of the individuals from each species, froze the other half, and removed gut contents from the frozen fishes 2 weeks later. I also did a small test of directly extracting the gut contents of some of the *Etheostoma caeruleum* individuals rather than washing with PBS, but there washing the gut contents prior to DNA extraction did not make a difference so I only show the washed results here. 
+
+\newpage
+
+# Read counts per sample
+
+I found that the read counts per sample of *C. anomalum* were much higher than *E. caeruleum*. This could be because there was a lot more gut contents to work with in the *C. anomalum* individuals -- they were on average a bit larger and their digestive tract is much more extensive. There could also be some sort of inhibition from the insects in *E. caeruleum* guts -- I think I'll pass the gut contents through a sieve to remove large chunks of diet items in my future work. Following this, I rarefied all samples to an equal sequencing depth of 365 reads. 
+
+```{r read_counts, echo=FALSE, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(phyloseq)
+library(qiime2R)
+library(reshape2)
+library(decontam)
+library(Biostrings)
+library(stringr)
+library(phylosmith)
+library(RColorBrewer)
+library(colorspace)
+library(forcats)
+library(vegan)
+library(ggpubr)
+library(rstatix)
+library(pander)
+load("pilot_dat.RDATA")
+pilot_dat <- subset_samples(pilot_nontree_m.nonrep.more100,washed=="yes") # remove unwashed samples
+read_depth <- data.frame(fish_S_ID=sample_data(pilot_dat)$fish_S_ID,
+                        fh_fz=sample_data(pilot_dat)$fh_fz,
+                        fish_species=sample_data(pilot_dat)$fish_species,
+                        washed=sample_data(pilot_dat)$washed,
+                        read_depth=sample_sums(pilot_dat))
+plot1 <- ggplot(data=read_depth, aes(x=fish_S_ID, y=read_depth)) +
+  geom_bar(stat="identity") +
+  facet_wrap(~fish_species + fh_fz, scales="free_x", nrow=1, ncol=4) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=45, vjust=1, hjust=1))
+plot1
+```
+
+\newpage
+
+# Phylum-level breakdown after rarifying
+
+The major phyla observed in the gut microbiome of these individuals is consistent with other freshwater fish microbiome research. The proportions of different phyla were much more consistent in *C. anomalum* individuals, but this could be a result of higher read counts in these individuals (low read counts = more stochasticity).
+
+```{r phylum, echo=FALSE, message=FALSE, warning=FALSE, out.width="100%"}
+load("pilot_dat_rarefied.RDATA")
+pilot_dat <- normld_salmon
+pilot_dat <- subset_samples(normld_salmon,washed=="yes") # remove unwashed 
+pilot_dat.ReAb <- transform_sample_counts(pilot_dat, function(OTU) OTU*100/sum(OTU))
+pilot_dat.ReAb.all <- prune_taxa(taxa_sums(pilot_dat.ReAb)>0, pilot_dat.ReAb)
+names_unknown <- taxa_names(pilot_dat.ReAb.all@tax_table)[is.na(pilot_dat.ReAb.all@tax_table[,"Phylum"])]
+pilot_dat.ReAb.all@tax_table[is.na(pilot_dat.ReAb.all@tax_table[,"Phylum"]),"Phylum"] <- c("unclassified Phyla")
+pilot_dat.ReAb.all <- tax_glom(pilot_dat.ReAb.all, NArm=FALSE, taxrank="Phylum")
+names_unknown <- taxa_names(pilot_dat.ReAb.all@tax_table)[pilot_dat.ReAb.all@tax_table[,"Phylum"]=="unclassified Phyla"]
+taxatable <- as.data.frame(pilot_dat.ReAb.all@tax_table[,"Phylum"])
+taxatable$OTUname <- rownames(taxatable)
+otutable <- as.data.frame(t(as.data.frame(pilot_dat.ReAb.all@otu_table)))
+otutable$otuname <- rownames(otutable)
+taxotutable <- merge(taxatable,otutable, by.x="OTUname", by.y="otuname")
+taxotutable <- taxotutable[,c(2:ncol(taxotutable))]
+Pgroup <- taxotutable$Phylum
+ReAb <- rowsum(taxotutable[,c(2:ncol(taxotutable))],Pgroup)
+ReAb$Phylum <- rownames(ReAb)
+
+my.cols <- c(brewer.pal(8,"Dark2"), "#C46254","bisque","darkorange", rainbow_hcl(10), rainbow(10), "azure3")
+base.phylum <- pilot_dat.ReAb.all %>% tax_glom(taxrank="Phylum", NArm=FALSE) %>% psmelt()
+ggplot(base.phylum, aes(x=fish_S_ID, y=Abundance, fill=fct_reorder(Phylum, Abundance, .desc=TRUE))) + 
+  geom_bar(stat="identity", position="stack") +
+  facet_wrap(~fish_species + fh_fz, scales="free_x", nrow=1, ncol=4) +
+  scale_fill_manual(name="Phylum", values=my.cols) +
+  scale_color_manual(name="Phylum", values=my.cols) +
+  ylab("Relative Abundance (%)") + xlab("Sample ID") +
+  theme(axis.text.x = element_text(angle=45, vjust=1, hjust=1),
+        axis.text=element_text(size=6),
+        legend.key.size = unit(0.2, 'cm'),
+        legend.text = element_text(size=6))
+```
+
+\newpage
+
+# Alpha diversity 
+
+### Richness, Shannon diversity, and Pielou's evenness for fresh vs. frozen samples
+
+
+```{r alpha_div, echo=FALSE, message=FALSE, warning=FALSE, fig.dim = c(9, 3)}
+alpha_ASV_meta <- data.frame(Shannon_ASV=diversity(pilot_dat@otu_table,index="shannon"), Observed_ASV=specnumber(pilot_dat@otu_table),Pielou_ASV=diversity(pilot_dat@otu_table,index="shannon")/log(specnumber(pilot_dat@otu_table)),Simpson_ASV=diversity(pilot_dat@otu_table,index="simp"),samplenames=sample_data(pilot_dat)$fish_S_ID,fh_fz=sample_data(pilot_dat)$fh_fz,fish_species=sample_data(pilot_dat)$fish_species)
+
+ASV_Shannon <- ggplot(alpha_ASV_meta, aes(x=fh_fz, y=Shannon_ASV, fill=fh_fz)) + 
+  geom_boxplot(outlier.shape=NA, outlier.colour=NA) + 
+  facet_wrap(~fish_species, scales="free_x", nrow=1, ncol=2) +
+  scale_fill_manual(values=c("#99CC99","#56B4E9")) +
+  geom_point(shape=16, size=2, color="gray") + 
+  labs(x="Fresh vs. frozen fish", y="ASV Richness", size=12) + 
+  theme(axis.title.x=element_blank(), axis.text=element_text(size=12)) + theme_bw()
+
+ASV_Observed <- ggplot(alpha_ASV_meta, aes(x=fh_fz, y=Observed_ASV, fill=fh_fz)) + 
+  geom_boxplot(outlier.shape=NA, outlier.colour=NA) + 
+  facet_wrap(~fish_species, scales="free_x", nrow=1, ncol=2) +
+  scale_fill_manual(values=c("#99CC99","#56B4E9")) +
+  geom_point(shape=16, size=2, color="gray") + 
+  labs(x="Fresh vs. frozen fish", y="Shannon diversity", size=12) + 
+  theme(axis.title.x=element_blank(), axis.text=element_text(size=12)) + theme_bw()
+
+ASV_Evenness <- ggplot(alpha_ASV_meta, aes(x=fh_fz, y=Pielou_ASV, fill=fh_fz)) + 
+  geom_boxplot(outlier.shape=NA, outlier.colour=NA) + 
+  facet_wrap(~fish_species, scales="free_x", nrow=1, ncol=2) +
+  scale_fill_manual(values=c("#99CC99","#56B4E9")) +
+  geom_point(shape=16, size=2, color="gray") + 
+  labs(x="Fresh vs. frozen fish", y="Pielou's evenness", size=12) + 
+  theme(axis.title.x=element_blank(), axis.text=element_text(size=12)) + theme_bw()
+  
+ggarrange(ASV_Observed, ASV_Shannon, ASV_Evenness, common.legend=FALSE,
+                   nrow=1, ncol=3, legend="none", align="h")
+
+```
+
+### ANOVA to test differences in alpha diversity metrics among samples
+
+There were no significant differences in any of the alpha diversity metrics for fresh vs. frozen individuals after controlling for species. Note: The variable "fh_fz" denotes fresh or frozen fish.
+
+### ASV richness
+
+```{r anova_1, echo=FALSE, message=FALSE, warning=FALSE}
+richness.aov2 <- aov(Observed_ASV ~ fh_fz + fish_species, data = alpha_ASV_meta)
+pander(richness.aov2)
+```
+
+### Shannon diversity
+
+```{r anova_2, echo=FALSE, message=FALSE, warning=FALSE}
+shannon.aov2 <- aov(Shannon_ASV ~ fh_fz + fish_species, data = alpha_ASV_meta)
+pander(shannon.aov2)
+```
+
+### Pielou's evenness
+
+```{r anova_3, echo=FALSE, message=FALSE, warning=FALSE}
+evenness.aov2 <- aov(Pielou_ASV ~ fh_fz + fish_species, data = alpha_ASV_meta)
+pander(evenness.aov2)
+```
+
+\newpage
+
+# Beta diversity based on Bray-Curtis dissimilarities
+
+There was high overlap in the microbe communities between fresh and frozen individuals of the same species. The two species were quite different from one another. 
+
+```{r pcoa, echo=FALSE, message=FALSE, warning=FALSE}
+ord.PCoA.bray <- ordinate(pilot_dat.ReAb, method="PCoA", distance="bray")
+pilot_dat.ReAb@sam_data$combined <- with(pilot_dat.ReAb@sam_data, paste0(fish_species, "_", fh_fz))
+plot4 <- plot_ordination(pilot_dat.ReAb, ord.PCoA.bray, type="samples", color="combined") +
+  stat_ellipse(type="norm") +
+  labs(color="Life Stage") + geom_point(size=6, stroke=1, shape=1) + 
+  theme(axis.text=element_text(size=12), axis.title=element_text(size=14), legend.title=element_text(size=14), legend.text=element_text(size=12)) +
+  theme_bw()
+plot4$layers <- plot4$layers[-1]
+plot4
+```
